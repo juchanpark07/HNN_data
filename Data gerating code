@@ -1,0 +1,139 @@
+!pip install tensorflow==2.0.0-beta
+import os
+import gym
+import zipfile
+import autograd
+import scipy.integrate
+solve_ivp  = scipy.integrate.solve_ivp
+import autograd.numpy as np
+import matplotlib.pyplot as plt
+from urllib.request import urlretrieve
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import Model
+from tensorflow.keras import layers
+from tensorflow.keras.layers import Dense
+
+from keras.models import Model
+from keras.models import Sequential
+from keras.layers import Dense, Activation
+
+LEARNING_RATE = 0.001       # learning rate for training models
+EPOCHS = 2000               # number of epochs to train models on
+HIDDEN_DIM = 200            # size of dense hidden layers in HNN model
+
+def get_trajectory(t_span = [0,3], timescale  = 10, y0 = None, noise_std = 0.1, radius = None):
+    t_eval = np.linspace(t_span[0], t_span[1], int(timescale*(t_span[1]-t_span[0])))
+    if (y0 is None):
+        y0 = np.random.rand(2)*2-1
+    if radius is None:
+      radius = np.random.rand()*0.9 + 1
+    y0 = y0/ np.sqrt((y0**2).sum()) * radius
+
+    spring_ivp = solve_ivp(fun = dynamics_fn, t_span = t_span, y0=y0, t_eval=t_eval, rtol=1e-10)
+
+    q, p = spring_ivp['y'][0], spring_ivp['y'][1]
+    dydt = [dynamics_fn(None, y) for y in spring_ivp['y'].T]
+    dydt = np.stack(dydt).T
+    dqdt, dpdt = np.split(dydt,2)
+
+    q += np.random.randn(*q.shape)*noise_std
+    p += np.random.randn(*p.shape)*noise_std
+    return q, p, dqdt, dpdt, t_eval
+
+#import numpy as np
+
+def symplectic_euler_step(dynamics_fn, y, dt):
+    """
+    Performs one step of Symplectic Euler integration.
+    dynamics_fn: function that computes derivatives [dq/dt, dp/dt]
+    y: current state [q, p]
+    dt: time step
+    """
+    q, p = y[0], y[1]
+    dqdt, dpdt = dynamics_fn(None, y)
+
+    # Symplectic Euler update
+    p_new = p + dpdt * dt
+    q_new = q + dqdt * dt
+
+    return np.array([q_new, p_new])
+
+def get_trajectory_revised(t_span=[0, 3], timescale=10, y0=None, noise_std=0.1, radius=None):
+    t_eval = np.linspace(t_span[0], t_span[1], int(timescale * (t_span[1] - t_span[0])))
+    if y0 is None:
+        y0 = np.random.rand(2) * 2 - 1
+    if radius is None:
+        radius = np.random.rand() * 0.9 + 1
+    y0 = y0 / np.sqrt((y0**2).sum()) * radius
+
+    q, p = [y0[0]], [y0[1]]
+    dt = t_eval[1] - t_eval[0]
+
+    for t in t_eval[:-1]:
+        dqdt, dpdt = dynamics_fn(t, np.array([q[-1], p[-1]]))
+        p_new = p[-1] + dpdt * dt
+        q_new = q[-1] + dqdt * dt
+        p.append(p_new)
+        q.append(q_new)
+
+    q = np.array(q)
+    p = np.array(p)
+
+    # Compute derivatives using dynamics_fn
+    dydt = [dynamics_fn(None, np.array([q[i], p[i]])) for i in range(len(q))]
+    dydt = np.stack(dydt).T
+    dqdt, dpdt = np.split(dydt, 2)
+
+    #q += np.random.randn(*q.shape) * noise_std
+    #p += np.random.randn(*p.shape) * noise_std
+    return q, p, dqdt, dpdt, t_eval
+
+def get_dataset(samples = 50, test_split = 0.5, radius=1):
+    data = {}
+    states, dstates = [],  []
+    for s in range(samples):
+        q, p, dqdt, dpdt, t = get_trajectory(radius=radius)  # states and their derivaties
+        states.append( np.stack( [q, p]).T )
+        dstates.append( np.stack( [dqdt, dpdt]).T)
+    data['states'] = np.concatenate(states)
+    data['dstates'] =  np.concatenate(dstates).squeeze()
+
+    split_ix = int(len(data['states']) * test_split)
+    split_data = {}
+    for k in ['states', 'dstates']:
+        split_data[k], split_data['test_' + k] = data[k][:split_ix], data[k][split_ix:]
+    data = split_data
+    return data
+
+def get_dataset_revised(samples=50, test_split=0.5, radius=1):
+    """
+    Generates a dataset of trajectories and their derivatives using get_trajectory_revised.
+    samples: Number of trajectories to generate
+    test_split: Fraction of data to use for testing
+    radius: Radius for initial condition normalization
+    """
+    data = {}
+    states, dstates = [], []
+
+    for s in range(samples):
+        # Generate trajectories using get_trajectory_revised
+        q, p, dqdt, dpdt, t = get_trajectory_revised(radius=radius)
+
+        # Stack states (q, p) and their derivatives (dq/dt, dp/dt)
+        states.append(np.stack([q, p]).T)
+        dstates.append(np.stack([dqdt, dpdt]).T)
+
+    # Concatenate all trajectories
+    data['states'] = np.concatenate(states)
+    data['dstates'] = np.concatenate(dstates).squeeze()
+
+    # Split data into training and testing sets
+    split_ix = int(len(data['states']) * test_split)
+    split_data = {}
+    for k in ['states', 'dstates']:
+        split_data[k] = data[k][:split_ix]
+        split_data['test_' + k] = data[k][split_ix:]
+
+    return split_data
